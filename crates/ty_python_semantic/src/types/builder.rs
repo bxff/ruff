@@ -36,7 +36,7 @@
 //! shares exactly the same possible super-types, and none of them are subtypes of each other
 //! (unless exactly the same literal type), we can avoid many unnecessary redundancy checks.
 
-use crate::types::enums::{enum_member_literals, enum_metadata};
+use crate::types::enums::{enum_member_literals, enum_metadata, has_transparent_equality};
 use crate::types::type_ordering::union_or_intersection_elements_ordering;
 use crate::types::{
     BytesLiteralType, ClassLiteral, EnumLiteralType, IntersectionType, KnownClass,
@@ -1250,6 +1250,31 @@ impl<'db> InnerIntersectionBuilder<'db> {
                     // A & ~B = A    if A and B are disjoint
                     if existing_positive.is_disjoint_from(db, new_negative) {
                         return;
+                    }
+                    // Special case for transparent enums: if the positive type is a primitive
+                    // literal and the negative type is a transparent enum literal with the same
+                    // underlying value, the intersection is Never.
+                    // E.g., Literal["g"] & ~Literal[Color.GREEN] = Never (when Color.GREEN has value "g")
+                    if let Type::EnumLiteral(enum_lit) = new_negative {
+                        if has_transparent_equality(db, enum_lit.enum_class(db)) {
+                            let enum_value =
+                                enum_metadata(db, enum_lit.enum_class(db)).and_then(|metadata| {
+                                    metadata.members.get(enum_lit.name(db)).copied()
+                                });
+                            if let Some(value_ty) = enum_value {
+                                // Check if the positive type equals the enum's underlying value
+                                if !existing_positive.is_disjoint_from(db, value_ty)
+                                    && existing_positive.is_single_valued(db)
+                                    && value_ty.is_single_valued(db)
+                                {
+                                    // If they're not disjoint and both are single-valued,
+                                    // they must be equal, so the intersection is Never.
+                                    *self = Self::default();
+                                    self.positive.insert(Type::Never);
+                                    return;
+                                }
+                            }
+                        }
                     }
                 }
 

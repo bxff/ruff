@@ -357,3 +357,24 @@ pub(crate) fn try_unwrap_nonmember_value<'db>(db: &'db dyn Db, ty: Type<'db>) ->
         _ => None,
     }
 }
+
+/// Checks if an enum class has "transparent" equality semantics.
+///
+/// Transparent enums like `StrEnum` and `IntEnum` compare equal to their underlying
+/// primitive values at runtime. For example, `Color.RED == "r"` returns `True` if
+/// `Color` is a `StrEnum` with `RED = "r"`.
+///
+/// This is important for type narrowing: when matching a `StrEnum` member against
+/// a string literal, we need to consider them as potentially equal rather than
+/// treating them as disjoint types.
+pub(crate) fn has_transparent_equality<'db>(db: &'db dyn Db, class: ClassLiteral<'db>) -> bool {
+    let class_type = Type::ClassLiteral(class);
+    // Must be an enum subclass
+    if !class_type.is_subtype_of(db, KnownClass::Enum.to_subclass_of(db)) {
+        return false;
+    }
+    // Must also inherit from int, str, or bytes for transparent equality
+    class_type.is_subtype_of(db, KnownClass::Int.to_subclass_of(db))
+        || class_type.is_subtype_of(db, KnownClass::Str.to_subclass_of(db))
+        || class_type.is_subtype_of(db, KnownClass::Bytes.to_subclass_of(db))
+}

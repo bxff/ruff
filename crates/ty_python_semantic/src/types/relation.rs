@@ -5,7 +5,7 @@ use rustc_hash::FxHashSet;
 use crate::place::{DefinedPlace, Place};
 use crate::types::builder::RecursivelyDefined;
 use crate::types::constraints::{IteratorConstraintsExtension, OptionConstraintsExtension};
-use crate::types::enums::is_single_member_enum;
+use crate::types::enums::{enum_metadata, has_transparent_equality, is_single_member_enum};
 use crate::types::{
     CallableType, ClassBase, ClassType, CycleDetector, DynamicType, KnownClass, KnownInstanceType,
     MemberLookupPolicy, PairVisitor, ProtocolInstanceType, SubclassOfInner,
@@ -1907,7 +1907,39 @@ impl<'db> Type<'db> {
                 | Type::ClassLiteral(..)
                 | Type::SpecialForm(..)
                 | Type::KnownInstance(..)),
-            ) => ConstraintSet::from(left != right),
+            ) => {
+                // Handle transparent enum equality (StrEnum, IntEnum, etc.)
+                // These compare equal to their underlying primitive values at runtime.
+                if let Type::EnumLiteral(enum_lit) = left {
+                    if has_transparent_equality(db, enum_lit.enum_class(db))
+                        && matches!(
+                            right,
+                            Type::StringLiteral(..) | Type::IntLiteral(..) | Type::BytesLiteral(..)
+                        )
+                    {
+                        return ConstraintSet::from(
+                            enum_metadata(db, enum_lit.enum_class(db))
+                                .and_then(|metadata| metadata.members.get(enum_lit.name(db)))
+                                .is_none_or(|&val_ty| val_ty.is_disjoint_from(db, right)),
+                        );
+                    }
+                }
+                if let Type::EnumLiteral(enum_lit) = right {
+                    if has_transparent_equality(db, enum_lit.enum_class(db))
+                        && matches!(
+                            left,
+                            Type::StringLiteral(..) | Type::IntLiteral(..) | Type::BytesLiteral(..)
+                        )
+                    {
+                        return ConstraintSet::from(
+                            enum_metadata(db, enum_lit.enum_class(db))
+                                .and_then(|metadata| metadata.members.get(enum_lit.name(db)))
+                                .is_none_or(|&val_ty| val_ty.is_disjoint_from(db, left)),
+                        );
+                    }
+                }
+                ConstraintSet::from(left != right)
+            }
 
             (
                 Type::SubclassOf(_),
