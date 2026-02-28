@@ -980,13 +980,59 @@ impl<'a> Visitor<'a> for BodyVisitor<'a> {
         match stmt {
             Stmt::Raise(ast::StmtRaise { exc, .. }) => {
                 if let Some(exc) = exc.as_ref() {
-                    // First try to resolve the exception directly
-                    if let Some(qualified_name) =
-                        self.semantic.resolve_qualified_name(map_callable(exc))
-                    {
+                    // Resolve the exception type from the raise expression, unwrapping
+                    // any method chain calls. For example:
+                    //   `raise ValueError("bad")` → resolves `ValueError`
+                    //   `raise ValueError.from_exception_data(...)` → resolves `ValueError`
+                    //   `raise Error.create(...).with_traceback(tb)` → resolves `Error`
+                    //   `raise module.SomeError` → resolves `module.SomeError`
+                    //
+                    // We peel off Call+Attribute layers (method calls) until we reach
+                    // a resolvable name. For bare attributes like `raise module.Error`,
+                    // the full attribute path IS the exception, so we resolve it directly.
+                    let mut current = exc.as_ref();
+                    let mut resolved = None;
+
+                    loop {
+                        match current {
+                            ast::Expr::Call(ast::ExprCall { func, .. }) => {
+                                if let ast::Expr::Attribute(attr) = func.as_ref() {
+                                    // Method call like `.from_data(...)` — try resolving
+                                    // the object (the class), and if that fails, keep
+                                    // peeling in case there's another layer.
+                                    if let Some(qn) =
+                                        self.semantic.resolve_qualified_name(&attr.value)
+                                    {
+                                        resolved = Some((qn, exc.range()));
+                                        break;
+                                    }
+                                    // The object itself might be another call chain —
+                                    // continue unwrapping.
+                                    current = &attr.value;
+                                } else {
+                                    // Simple call like `ValueError(...)` — resolve the func.
+                                    if let Some(qn) =
+                                        self.semantic.resolve_qualified_name(func.as_ref())
+                                    {
+                                        resolved = Some((qn, exc.range()));
+                                    }
+                                    break;
+                                }
+                            }
+                            _ => {
+                                // Bare expression like `ValueError` or `module.SomeError`
+                                if let Some(qn) = self.semantic.resolve_qualified_name(current) {
+                                    resolved = Some((qn, exc.range()));
+                                }
+                                break;
+                            }
+                        }
+                    }
+
+                    if let Some((qualified_name, range)) = resolved {
                         self.raised_exceptions.push(ExceptionEntry {
                             qualified_name,
-                            range: exc.range(),
+                            range,
                         });
                     } else if let ast::Expr::Name(name) = exc.as_ref() {
                         // If it's a variable name, check if it's bound to an exception in the
